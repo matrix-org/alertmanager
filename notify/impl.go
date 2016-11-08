@@ -1009,9 +1009,11 @@ func (n *Matrix) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 	var err error
 	var data = n.tmpl.Data(receiverName(ctx), groupLabels(ctx), as...)
 
-	// TODO txnid
-	var url = fmt.Sprintf("%s/_matrix/client/r0/rooms/%s/send/m.room.message/TXNID?access_token=%s",
-		n.conf.Homeserver, n.conf.RoomID, n.conf.AccessToken)
+	// TODO(paul): generate the transaction ID on something unique about the
+	//   alert firing, to suppress duplicates
+	var txnid = fmt.Sprintf("%d", time.Now().UnixNano()/int64(time.Millisecond))
+	var url = fmt.Sprintf("%s/_matrix/client/r0/rooms/%s/send/m.room.message/%s?access_token=%s",
+		n.conf.Homeserver, n.conf.RoomID, txnid, n.conf.AccessToken)
 
 	msg := &matrixRoomMessage{
 		MsgType: "m.text",
