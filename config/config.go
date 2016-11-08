@@ -315,6 +315,20 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 				voc.APIKey = c.Global.VictorOpsAPIKey
 			}
 		}
+		for _, mc := range rcv.MatrixConfigs {
+			if mc.Homeserver == "" {
+				if c.Global.MatrixHomeserver == "" {
+					return fmt.Errorf("no global Matrix homeserver set")
+				}
+				mc.Homeserver = c.Global.MatrixHomeserver
+			}
+			if mc.AccessToken == "" {
+				if c.Global.MatrixAccessToken == "" {
+					return fmt.Errorf("no global Matrix access token set")
+				}
+				mc.AccessToken = c.Global.MatrixAccessToken
+			}
+		}
 		names[rcv.Name] = struct{}{}
 	}
 
@@ -376,7 +390,8 @@ type GlobalConfig struct {
 	// if it has not been updated.
 	ResolveTimeout model.Duration `yaml:"resolve_timeout" json:"resolve_timeout"`
 
-	HTTPConfig *commoncfg.HTTPClientConfig `yaml:"http_config,omitempty" json:"http_config,omitempty"`
+	HTTPConfig *commoncfg.HTTPClientConfig `yaml:"http_config,omitempty" json:"http_config,omitempty"`MatrixHomeserver  string `yaml:"matrix_homeserver"`
+	MatrixAccessToken Secret `yaml:"matrix_access_token"`
 
 	SMTPFrom         string `yaml:"smtp_from,omitempty" json:"smtp_from,omitempty"`
 	SMTPHello        string `yaml:"smtp_hello,omitempty" json:"smtp_hello,omitempty"`
