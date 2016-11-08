@@ -232,6 +232,20 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 				voc.APIURL += "/"
 			}
 		}
+		for _, mc := range rcv.MatrixConfigs {
+			if mc.Homeserver == "" {
+				if c.Global.MatrixHomeserver == "" {
+					return fmt.Errorf("no global Matrix homeserver set")
+				}
+				mc.Homeserver = c.Global.MatrixHomeserver
+			}
+			if mc.AccessToken == "" {
+				if c.Global.MatrixAccessToken == "" {
+					return fmt.Errorf("no global Matrix access token set")
+				}
+				mc.AccessToken = c.Global.MatrixAccessToken
+			}
+		}
 		names[rcv.Name] = struct{}{}
 	}
 
@@ -290,19 +304,21 @@ type GlobalConfig struct {
 	// if it has not been updated.
 	ResolveTimeout model.Duration `yaml:"resolve_timeout"`
 
-	SMTPFrom         string `yaml:"smtp_from"`
-	SMTPSmarthost    string `yaml:"smtp_smarthost"`
-	SMTPAuthUsername string `yaml:"smtp_auth_username"`
-	SMTPAuthPassword Secret `yaml:"smtp_auth_password"`
-	SMTPAuthSecret   Secret `yaml:"smtp_auth_secret"`
-	SMTPAuthIdentity string `yaml:"smtp_auth_identity"`
-	SMTPRequireTLS   bool   `yaml:"smtp_require_tls"`
-	SlackAPIURL      Secret `yaml:"slack_api_url"`
-	PagerdutyURL     string `yaml:"pagerduty_url"`
-	HipchatURL       string `yaml:"hipchat_url"`
-	HipchatAuthToken Secret `yaml:"hipchat_auth_token"`
-	OpsGenieAPIHost  string `yaml:"opsgenie_api_host"`
-	VictorOpsAPIURL  string `yaml:"victorops_api_url"`
+	SMTPFrom          string `yaml:"smtp_from"`
+	SMTPSmarthost     string `yaml:"smtp_smarthost"`
+	SMTPAuthUsername  string `yaml:"smtp_auth_username"`
+	SMTPAuthPassword  Secret `yaml:"smtp_auth_password"`
+	SMTPAuthSecret    Secret `yaml:"smtp_auth_secret"`
+	SMTPAuthIdentity  string `yaml:"smtp_auth_identity"`
+	SMTPRequireTLS    bool   `yaml:"smtp_require_tls"`
+	SlackAPIURL       Secret `yaml:"slack_api_url"`
+	PagerdutyURL      string `yaml:"pagerduty_url"`
+	HipchatURL        string `yaml:"hipchat_url"`
+	HipchatAuthToken  Secret `yaml:"hipchat_auth_token"`
+	OpsGenieAPIHost   string `yaml:"opsgenie_api_host"`
+	VictorOpsAPIURL   string `yaml:"victorops_api_url"`
+	MatrixHomeserver  string `yaml:"matrix_homeserver"`
+	MatrixAccessToken Secret `yaml:"matrix_access_token"`
 
 	// Catches all undefined fields and must be empty after parsing.
 	XXX map[string]interface{} `yaml:",inline"`
