@@ -1430,9 +1430,6 @@ func (n *Matrix) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 		return false, err
 	}
 
-	log.Infof("POST to %s", url)
-	log.Infof("  body: %s", buf)
-
 	// ctxhttp has no .Put() method
 	req, err := http.NewRequest("PUT", url, &buf)
 	if err != nil {
@@ -1444,8 +1441,6 @@ func (n *Matrix) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 		return true, err
 	}
 	defer resp.Body.Close()
-
-	log.Infof("Response code %d", resp.StatusCode)
 
 	return false, nil
 }
