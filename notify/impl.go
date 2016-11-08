@@ -138,6 +138,10 @@ func BuildReceiverIntegrations(nc *config.Receiver, tmpl *template.Template, log
 		n := NewPushover(c, tmpl, logger)
 		add("pushover", i, n, c)
 	}
+	for i, c := range nc.MatrixConfigs {
+		n := NewMatrix(c, tmpl)
+		add("matrix", i, n, c)
+	}
 	return integrations
 }
 
@@ -1381,4 +1385,65 @@ func hashKey(s string) string {
 	h := sha256.New()
 	h.Write([]byte(s))
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// Matrix implements a Notifier for Matrix notifications.
+type Matrix struct {
+	conf *config.MatrixConfig
+	tmpl *template.Template
+}
+
+// NewMatrix returns a new Matrix notification handler.
+func NewMatrix(conf *config.MatrixConfig, tmpl *template.Template) *Matrix {
+	return &Matrix{
+		conf: conf,
+		tmpl: tmpl,
+	}
+}
+
+type matrixRoomMessage struct {
+	MsgType string `json:"msgtype"`
+	Body    string `json:"body"`
+}
+
+// Notify implements the Notifier interface.
+func (n *Matrix) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
+	var err error
+	var data = n.tmpl.Data(receiverName(ctx), groupLabels(ctx), as...)
+
+	// TODO txnid
+	var url = fmt.Sprintf("%s/_matrix/client/r0/rooms/%s/send/m.room.message/TXNID?access_token=%s",
+		n.conf.Homeserver, n.conf.RoomID, n.conf.AccessToken)
+
+	msg := &matrixRoomMessage{
+		MsgType: "m.text",
+		Body:    tmplText(n.tmpl, data, &err)(n.conf.Message),
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(msg); err != nil {
+		return false, err
+	}
+
+	log.Infof("POST to %s", url)
+	log.Infof("  body: %s", buf)
+
+	// ctxhttp has no .Put() method
+	req, err := http.NewRequest("PUT", url, &buf)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", contentTypeJSON)
+	resp, err := ctxhttp.Do(ctx, http.DefaultClient, req)
+	if err != nil {
+		return true, err
+	}
+	defer resp.Body.Close()
+
+	log.Infof("Response code %d", resp.StatusCode)
+
+	return false, nil
 }

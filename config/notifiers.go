@@ -134,6 +134,15 @@ var (
 		Retry:    duration(1 * time.Minute),
 		Expire:   duration(1 * time.Hour),
 	}
+
+	// DefaultMatrixConfig defines default values for Matrix configurations.
+	DefaultMatrixConfig = MatrixConfig{
+		NotifierConfig: NotifierConfig{
+			VSendResolved: true,
+		},
+		Homeserver: "https://matrix.org",
+		Message:    `{{ template "matrix.default.message" . }}`,
+	}
 )
 
 // NotifierConfig contains base options common across all notifier configurations.
@@ -474,4 +483,27 @@ func (c *PushoverConfig) UnmarshalYAML(unmarshal func(interface{}) error) error 
 		return fmt.Errorf("missing token in Pushover config")
 	}
 	return checkOverflow(c.XXX, "pushover config")
+}
+
+// MatrixConfig configures notifications via Matrix.
+type MatrixConfig struct {
+	NotifierConfig `yaml:",inline"`
+
+	Homeserver  string `yaml:"homeserver"`
+	AccessToken Secret `yaml:"access_token"`
+	RoomID      string `yaml:"room_id"`
+	Message     string `yaml:"message"`
+
+	// Catches all undefined fields and must be empty after parsing.
+	XXX map[string]interface{} `yaml:",inline"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *MatrixConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	*c = DefaultMatrixConfig
+	type plain MatrixConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	return checkOverflow(c.XXX, "matrix config")
 }
