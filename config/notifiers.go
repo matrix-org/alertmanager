@@ -493,6 +493,7 @@ type MatrixConfig struct {
 	AccessToken Secret `yaml:"access_token"`
 	RoomID      string `yaml:"room_id"`
 	Message     string `yaml:"message"`
+	HtmlMessage string `yaml:"html_message"`
 
 	// Catches all undefined fields and must be empty after parsing.
 	XXX map[string]interface{} `yaml:",inline"`

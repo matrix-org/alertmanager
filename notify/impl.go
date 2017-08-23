@@ -1402,8 +1402,10 @@ func NewMatrix(conf *config.MatrixConfig, tmpl *template.Template) *Matrix {
 }
 
 type matrixRoomMessage struct {
-	MsgType string `json:"msgtype"`
-	Body    string `json:"body"`
+	MsgType       string `json:"msgtype"`
+	Body          string `json:"body"`
+	Format        string `json:"formatted,omitempty"`
+	FormattedBody string `json:"formatted_body,omitempty"`
 }
 
 // Notify implements the Notifier interface.
@@ -1417,12 +1419,29 @@ func (n *Matrix) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 	var url = fmt.Sprintf("%s/_matrix/client/r0/rooms/%s/send/m.room.message/%s?access_token=%s",
 		n.conf.Homeserver, n.conf.RoomID, txnid, n.conf.AccessToken)
 
-	msg := &matrixRoomMessage{
-		MsgType: "m.text",
-		Body:    tmplText(n.tmpl, data, &err)(n.conf.Message),
-	}
+	var body = tmplText(n.tmpl, data, &err)(n.conf.Message)
 	if err != nil {
 		return false, err
+	}
+
+	var msg *matrixRoomMessage
+	if n.conf.HtmlMessage != "" {
+		var html = tmplText(n.tmpl, data, &err)(n.conf.HtmlMessage)
+		if err != nil {
+			return false, err
+		}
+
+		msg = &matrixRoomMessage{
+			MsgType:       "m.text",
+			Body:          body,
+			Format:        "org.matrix.custom.html",
+			FormattedBody: html,
+		}
+	} else {
+		msg = &matrixRoomMessage{
+			MsgType: "m.text",
+			Body:    body,
+		}
 	}
 
 	var buf bytes.Buffer
