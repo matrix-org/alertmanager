@@ -27,9 +27,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
 	"github.com/matttproud/golang_protobuf_extensions/pbutil"
 	pb "github.com/prometheus/alertmanager/nflog/nflogpb"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
 	"github.com/weaveworks/mesh"
 )
@@ -43,8 +43,7 @@ type Log interface {
 	// The Log* methods store a notification log entry for
 	// a fully qualified receiver and a given IDs identifying the
 	// alert object.
-	LogActive(r *pb.Receiver, key, hash []byte) error
-	LogResolved(r *pb.Receiver, key, hash []byte) error
+	Log(r *pb.Receiver, key string, firing, resolved []uint64) error
 
 	// Query the log along the given Paramteres.
 	//
@@ -68,7 +67,7 @@ type Log interface {
 // group or a given time interval.
 type query struct {
 	recv     *pb.Receiver
-	groupKey []byte
+	groupKey string
 }
 
 // QueryParam is a function that modifies a query to incorporate
@@ -85,7 +84,7 @@ func QReceiver(r *pb.Receiver) QueryParam {
 }
 
 // QGroupKey adds a group key as querying argument.
-func QGroupKey(gk []byte) QueryParam {
+func QGroupKey(gk string) QueryParam {
 	return func(q *query) error {
 		q.groupKey = gk
 		return nil
@@ -94,6 +93,7 @@ func QGroupKey(gk []byte) QueryParam {
 
 type nlog struct {
 	logger    log.Logger
+	metrics   *metrics
 	now       func() time.Time
 	retention time.Duration
 
@@ -111,6 +111,50 @@ type nlog struct {
 	// and indexing.
 	mtx sync.RWMutex
 	st  gossipData
+}
+
+type metrics struct {
+	gcDuration       prometheus.Summary
+	snapshotDuration prometheus.Summary
+	queriesTotal     prometheus.Counter
+	queryErrorsTotal prometheus.Counter
+	queryDuration    prometheus.Histogram
+}
+
+func newMetrics(r prometheus.Registerer) *metrics {
+	m := &metrics{}
+
+	m.gcDuration = prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "alertmanager_nflog_gc_duration_seconds",
+		Help: "Duration of the last notification log garbage collection cycle.",
+	})
+	m.snapshotDuration = prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "alertmanager_nflog_snapshot_duration_seconds",
+		Help: "Duration of the last notification log snapshot.",
+	})
+	m.queriesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "alertmanager_nflog_queries_total",
+		Help: "Number of notification log queries were received.",
+	})
+	m.queryErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "alertmanager_nflog_query_errors_total",
+		Help: "Number notification log received queries that failed.",
+	})
+	m.queryDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "alertmanager_nflog_query_duration_seconds",
+		Help: "Duration of notification log query evaluation.",
+	})
+
+	if r != nil {
+		r.MustRegister(
+			m.gcDuration,
+			m.snapshotDuration,
+			m.queriesTotal,
+			m.queryErrorsTotal,
+			m.queryDuration,
+		)
+	}
+	return m
 }
 
 // Option configures a new Log implementation.
@@ -147,6 +191,14 @@ func WithNow(f func() time.Time) Option {
 func WithLogger(logger log.Logger) Option {
 	return func(l *nlog) error {
 		l.logger = logger
+		return nil
+	}
+}
+
+// WithMetrics registers metrics for the notification log.
+func WithMetrics(r prometheus.Registerer) Option {
+	return func(l *nlog) error {
+		l.metrics = newMetrics(r)
 		return nil
 	}
 }
@@ -195,6 +247,10 @@ func New(opts ...Option) (Log, error) {
 			return nil, err
 		}
 	}
+	if l.metrics == nil {
+		l.metrics = newMetrics(nil)
+	}
+
 	if l.snapf != "" {
 		if f, err := os.Open(l.snapf); !os.IsNotExist(err) {
 			if err != nil {
@@ -207,6 +263,7 @@ func New(opts ...Option) (Log, error) {
 			}
 		}
 	}
+
 	go l.run()
 
 	return l, nil
@@ -266,23 +323,17 @@ Loop:
 	}
 }
 
-// LogActive implements the Log interface.
-func (l *nlog) LogActive(r *pb.Receiver, key, hash []byte) error {
-	return l.log(r, key, hash, false)
-}
-
-// LogResolved implements the Log interface.
-func (l *nlog) LogResolved(r *pb.Receiver, key, hash []byte) error {
-	return l.log(r, key, hash, true)
+func receiverKey(r *pb.Receiver) string {
+	return fmt.Sprintf("%s/%s/%d", r.GroupName, r.Integration, r.Idx)
 }
 
 // stateKey returns a string key for a log entry consisting of the group key
 // and receiver.
-func stateKey(k []byte, r *pb.Receiver) string {
-	return fmt.Sprintf("%s:%s", k, r)
+func stateKey(k string, r *pb.Receiver) string {
+	return fmt.Sprintf("%s:%s", k, receiverKey(r))
 }
 
-func (l *nlog) log(r *pb.Receiver, gkey, ghash []byte, resolved bool) error {
+func (l *nlog) Log(r *pb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64) error {
 	// Write all st with the same timestamp.
 	now := l.now()
 	key := stateKey(gkey, r)
@@ -292,34 +343,21 @@ func (l *nlog) log(r *pb.Receiver, gkey, ghash []byte, resolved bool) error {
 
 	if prevle, ok := l.st[key]; ok {
 		// Entry already exists, only overwrite if timestamp is newer.
-		// This may with raciness or clock-drift across AM nodes.
-		prevts, err := ptypes.Timestamp(prevle.Entry.Timestamp)
-		if err != nil {
-			return err
-		}
-		if prevts.After(now) {
+		// This may happen with raciness or clock-drift across AM nodes.
+		if prevle.Entry.Timestamp.After(now) {
 			return nil
 		}
 	}
 
-	ts, err := ptypes.TimestampProto(now)
-	if err != nil {
-		return err
-	}
-	expts, err := ptypes.TimestampProto(now.Add(l.retention))
-	if err != nil {
-		return err
-	}
-
 	e := &pb.MeshEntry{
 		Entry: &pb.Entry{
-			Receiver:  r,
-			GroupKey:  gkey,
-			GroupHash: ghash,
-			Resolved:  resolved,
-			Timestamp: ts,
+			Receiver:       r,
+			GroupKey:       []byte(gkey),
+			Timestamp:      now,
+			FiringAlerts:   firingAlerts,
+			ResolvedAlerts: resolvedAlerts,
 		},
-		ExpiresAt: expts,
+		ExpiresAt: now.Add(l.retention),
 	}
 	l.gossip.GossipBroadcast(gossipData{
 		key: e,
@@ -331,6 +369,9 @@ func (l *nlog) log(r *pb.Receiver, gkey, ghash []byte, resolved bool) error {
 
 // GC implements the Log interface.
 func (l *nlog) GC() (int, error) {
+	start := time.Now()
+	defer func() { l.metrics.gcDuration.Observe(time.Since(start).Seconds()) }()
+
 	now := l.now()
 	var n int
 
@@ -338,9 +379,10 @@ func (l *nlog) GC() (int, error) {
 	defer l.mtx.Unlock()
 
 	for k, le := range l.st {
-		if ets, err := ptypes.Timestamp(le.ExpiresAt); err != nil {
-			return n, err
-		} else if !ets.After(now) {
+		if le.ExpiresAt.IsZero() {
+			return n, errors.New("unexpected zero expiration timestamp")
+		}
+		if !le.ExpiresAt.After(now) {
 			delete(l.st, k)
 			n++
 		}
@@ -351,27 +393,37 @@ func (l *nlog) GC() (int, error) {
 
 // Query implements the Log interface.
 func (l *nlog) Query(params ...QueryParam) ([]*pb.Entry, error) {
-	q := &query{}
-	for _, p := range params {
-		if err := p(q); err != nil {
-			return nil, err
+	start := time.Now()
+	l.metrics.queriesTotal.Inc()
+
+	entries, err := func() ([]*pb.Entry, error) {
+		q := &query{}
+		for _, p := range params {
+			if err := p(q); err != nil {
+				return nil, err
+			}
 		}
-	}
-	// TODO(fabxc): For now our only query mode is the most recent entry for a
-	// receiver/group_key combination.
-	if q.recv == nil || q.groupKey == nil {
-		// TODO(fabxc): allow more complex queries in the future.
-		// How to enable pagination?
-		return nil, errors.New("no query parameters specified")
-	}
+		// TODO(fabxc): For now our only query mode is the most recent entry for a
+		// receiver/group_key combination.
+		if q.recv == nil || q.groupKey == "" {
+			// TODO(fabxc): allow more complex queries in the future.
+			// How to enable pagination?
+			return nil, errors.New("no query parameters specified")
+		}
 
-	l.mtx.RLock()
-	defer l.mtx.RUnlock()
+		l.mtx.RLock()
+		defer l.mtx.RUnlock()
 
-	if le, ok := l.st[stateKey(q.groupKey, q.recv)]; ok {
-		return []*pb.Entry{le.Entry}, nil
+		if le, ok := l.st[stateKey(q.groupKey, q.recv)]; ok {
+			return []*pb.Entry{le.Entry}, nil
+		}
+		return nil, ErrNotFound
+	}()
+	if err != nil {
+		l.metrics.queryErrorsTotal.Inc()
 	}
-	return nil, ErrNotFound
+	l.metrics.queryDuration.Observe(time.Since(start).Seconds())
+	return entries, err
 }
 
 // loadSnapshot loads a snapshot generated by Snapshot() into the state.
@@ -389,7 +441,7 @@ func (l *nlog) loadSnapshot(r io.Reader) error {
 			}
 			return err
 		}
-		st[stateKey(e.Entry.GroupKey, e.Entry.Receiver)] = &e
+		st[stateKey(string(e.Entry.GroupKey), e.Entry.Receiver)] = &e
 	}
 	l.st = st
 
@@ -398,6 +450,9 @@ func (l *nlog) loadSnapshot(r io.Reader) error {
 
 // Snapshot implements the Log interface.
 func (l *nlog) Snapshot(w io.Writer) (int, error) {
+	start := time.Now()
+	defer func() { l.metrics.snapshotDuration.Observe(time.Since(start).Seconds()) }()
+
 	l.mtx.RLock()
 	defer l.mtx.RUnlock()
 
@@ -472,7 +527,7 @@ func decodeGossipData(msg []byte) (gossipData, error) {
 			}
 			return gd, err
 		}
-		gd[stateKey(e.Entry.GroupKey, e.Entry.Receiver)] = &e
+		gd[stateKey(string(e.Entry.GroupKey), e.Entry.Receiver)] = &e
 	}
 
 	return gd, nil
@@ -525,17 +580,7 @@ func (gd gossipData) Merge(other mesh.GossipData) mesh.GossipData {
 			gd[k] = e
 			continue
 		}
-		pts, err := ptypes.Timestamp(prev.Entry.Timestamp)
-		if err != nil {
-			// TODO(fabxc): log error and skip entry. What can actually error here?
-			panic(err)
-		}
-		ets, err := ptypes.Timestamp(e.Entry.Timestamp)
-		if err != nil {
-			// TODO(fabxc): see above.
-			panic(err)
-		}
-		if pts.Before(ets) {
+		if prev.Entry.Timestamp.Before(e.Entry.Timestamp) {
 			gd[k] = e
 		}
 	}
@@ -553,17 +598,7 @@ func (gd gossipData) mergeDelta(od gossipData) gossipData {
 			delta[k] = e
 			continue
 		}
-		pts, err := ptypes.Timestamp(prev.Entry.Timestamp)
-		if err != nil {
-			// TODO(fabxc): log error and skip entry. What can actually error here?
-			panic(err)
-		}
-		ets, err := ptypes.Timestamp(e.Entry.Timestamp)
-		if err != nil {
-			// TODO(fabxc): see above.
-			panic(err)
-		}
-		if pts.Before(ets) {
+		if prev.Entry.Timestamp.Before(e.Entry.Timestamp) {
 			gd[k] = e
 			delta[k] = e
 		}

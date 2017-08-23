@@ -1,40 +1,20 @@
 <!DOCTYPE html>
-<html lang="en" ng-app="am">
-<head>
-	<script src="lib/jquery.min.js"></script>
-	<script src="lib/moment.min.js"></script>
-
-	<script src="lib/angular.min.js"></script>
-	<script src="lib/angular-sanitize.min.js"></script>
-	<script src="lib/angular-route.min.js"></script>
-	<script src="lib/angular-resource.min.js"></script>
-	<script src="lib/angular-moment.min.js"></script>
-
-	<script src="app/js/app.js"></script>
-
-	<link rel="stylesheet" href="lib/kube.min.css">
-	<link rel="stylesheet" href="app/css/main.css">
-
-	<title>AlertManager – Prometheus</title>
-</head>
-<body>
-	<header class="group">
-		<h1 id="logo" class="thin hide-for-small">
-			<a href="#/">Alert<span style="font-style: italic; color: #d3d3d3">manager</span></a>
-		</h1>
-
-		<nav id="top-nav" ng-controller="NavCtrl">
-			<ul>
-				<li ng-repeat="item in items" ng-class="{'selected': selected(item)}">
-					<a ng-href="#{{ item.url }}" class="upper">{{ item.name }}</a>
-				</li>
-			</ul>
-		</nav>
-	</header>
-
-	<main id="content">
-		<div ng-view></div>
-	</main>
-
-</body>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+        <title>Alertmanager</title>
+    </head>
+    <body>
+        <script>
+            //If there is no trailing slash at the end of the path in the url,
+            // add one. This ensures assets like script.js` are loaded properly
+            if (window.location.pathname.endsWith('/') === false) {
+                window.location.pathname = window.location.pathname + '/';
+                console.log('added slash');
+            }
+        </script>
+        <script src="script.js"></script>
+        <script>Elm.Main.embed(document.body, { production: true })</script>
+    </body>
 </html>

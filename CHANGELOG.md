@@ -1,23 +1,95 @@
-## v0.5.0-beta.0 / 2016-10-06
+## 0.8.0 / 2017-07-20
 
-* [BUGFIX] Fix resolved notification filter
-* [ENHANCEMENT] Add silence metrics
-* [ENHANCEMENT] Allow global require TLS config
+* [FEATURE] Add ability to filter alerts by receiver in the UI (#890)
+* [FEATURE] Add User-Agent for webhook requests (#893)
+* [ENHANCEMENT] Add possibility to have a global victorops api_key (#897)
+* [ENHANCEMENT] Add EntityDisplayName and improve StateMessage for Victorops
+  (#769)
+* [ENHANCEMENT] Omit empty config fields and show regex upon re-marshalling to
+  elide secrets (#864)
+* [ENHANCEMENT] Parse API error messages in UI (#866)
+* [ENHANCEMENT] Enable sending mail via smtp port 465 (#704)
+* [BUGFIX] Prevent duplicate notifications by sorting matchers (#882)
+* [BUGFIX] Remove timeout for UI requests (#890)
+* [BUGFIX] Update config file location of CLI in flag usage text (#895)
 
-## v0.5.0-alpha.0 / 2016-09-09
+## 0.7.1 / 2017-06-09
 
-This realease requires a storage wipe.
+* [BUGFIX] Fix filtering by label on Alert list and Silence list page
 
-* [FEATURE] High Availability
-* [FEATURE] Garbage collected storage
-* [CHANGE] Different storage format
+## 0.7.0 / 2017-06-08
 
-## v0.4.2 / 2016-09-02
+* [CHANGE] Rewrite UI from scratch improving UX
+* [CHANGE] Rename `config` to `configYAML` on `api/v1/status`
+* [FEATURE] Add ability to update a silence on `api/v1/silences` POST endpoint (See #765)
+* [FEATURE] Return alert status on `api/v1/alerts` GET endpoint
+* [FEATURE] Serve silence state on `api/v1/silences` GET endpoint
+* [FEATURE] Add ability to specify a route prefix
+* [FEATURE] Add option to disable AM listening on mesh port
+* [ENHANCEMENT] Add ability to specify `filter` string and `silenced` flag on `api/v1/alerts` GET endpoint
+* [ENHANCEMENT] Update `cache-control` to prevent caching for web assets in general.
+* [ENHANCEMENT] Serve web assets by alertmanager instead of external CDN (See #846)
+* [ENHANCEMENT] Elide secrets in alertmanager config (See #840)
+* [ENHANCEMENT] AMTool: Move config file to a more consistent location (See #843)
+* [BUGFIX] Enable builds for Solaris/Illumos
+* [BUGFIX] Load web assets based on url path (See #323)
+
+## 0.6.2 / 2017-05-09
+
+* [BUGFIX] Correctly link to silences from alert again
+* [BUGFIX] Correctly hide silenced/show active alerts in UI again
+* [BUGFIX] Fix regression of alerts not being displayed until first processing
+* [BUGFIX] Fix internal usage of wrong lock for silence markers
+* [BUGFIX] Adapt amtool's API parsing to recent API changes
+* [BUGFIX] Correctly marshal regexes in config JSON response
+* [CHANGE] Anchor silence regex matchers to be consistent with Prometheus
+* [ENHANCEMENT] Error if root route is using `continue` keyword
+
+## 0.6.1 / 2017-04-28
+
+* [BUGFIX] Fix incorrectly serialized hash for notification providers.
+* [ENHANCEMENT] Add processing status field to alerts.
+* [FEATURE] Add config hash metric.
+
+## 0.6.0 / 2017-04-25
+
+* [BUGFIX] Add `groupKey` to `alerts/groups` endpoint https://github.com/prometheus/alertmanager/pull/576
+* [BUGFIX] Only notify on firing alerts https://github.com/prometheus/alertmanager/pull/595
+* [BUGFIX] Correctly marshal regex's in config for routing tree https://github.com/prometheus/alertmanager/pull/602
+* [BUGFIX] Prevent panic when failing to load config https://github.com/prometheus/alertmanager/pull/607
+* [BUGFIX] Prevent panic when alertmanager is started with an empty `-mesh.peer` https://github.com/prometheus/alertmanager/pull/726
+* [CHANGE] Rename VictorOps config variables https://github.com/prometheus/alertmanager/pull/667
+* [CHANGE] No longer generate releases for openbsd/arm https://github.com/prometheus/alertmanager/pull/732
+* [ENHANCEMENT] Add `DELETE` as accepted CORS method https://github.com/prometheus/alertmanager/commit/0ecc59076ca6b4cbb63252fa7720a3d89d1c81d3
+* [ENHANCEMENT] Switch to using `gogoproto` for protobuf https://github.com/prometheus/alertmanager/pull/715
+* [ENHANCEMENT] Include notifier type in logs and errors https://github.com/prometheus/alertmanager/pull/702
+* [FEATURE] Expose mesh peers on status page https://github.com/prometheus/alertmanager/pull/644
+* [FEATURE] Add `reReplaceAll` template function https://github.com/prometheus/alertmanager/pull/639
+* [FEATURE] Allow label-based filtering alerts/silences through API https://github.com/prometheus/alertmanager/pull/633
+* [FEATURE] Add commandline tool for interacting with alertmanager https://github.com/prometheus/alertmanager/pull/636
+
+## 0.5.1 / 2016-11-24
+
+* [BUGFIX] Fix crash caused by race condition in silencing
+* [ENHANCEMENT] Improve logging of API errors
+* [ENHANCEMENT] Add metrics for the notification log
+
+## 0.5.0 / 2016-11-01
+
+This release requires a storage wipe. It contains fundamental internal
+changes that came with implementing the high availability mode.
+
+* [FEATURE] Alertmanager clustering for high availability
+* [FEATURE] Garbage collection of old silences and notification logs
+* [CHANGE] New storage format
+* [CHANGE] Stricter silence semantics for consistent historical view
+
+## 0.4.2 / 2016-09-02
 
 * [BUGFIX] Fix broken regex checkbox in silence form
 * [BUGFIX] Simplify inconsistent silence update behavior
 
-## v0.4.1 / 2016-08-31
+## 0.4.1 / 2016-08-31
 
 * [BUGFIX] Wait for silence query to finish instead of showing error
 * [BUGFIX] Fix sorting of silences
@@ -25,7 +97,7 @@ This realease requires a storage wipe.
 * [BUGFIX] Fix styling of silences
 * [ENHANCEMENT] Provide cleaner API silence interface
 
-## v0.4.0 / 2016-08-23
+## 0.4.0 / 2016-08-23
 
 * [FEATURE] Silences are now paginated in the web ui
 * [CHANGE] Failure to start on unparsed flags

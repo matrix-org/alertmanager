@@ -15,6 +15,7 @@ package notify
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/version"
 	"golang.org/x/net/context"
 	"golang.org/x/net/context/ctxhttp"
 
@@ -79,7 +81,7 @@ func (i *Integration) Notify(ctx context.Context, alerts ...*types.Alert) (bool,
 		return false, nil
 	}
 
-	return i.notifier.Notify(ctx, alerts...)
+	return i.notifier.Notify(ctx, res...)
 }
 
 // BuildReceiverIntegrations builds a list of integration notifiers off of a
@@ -138,6 +140,8 @@ func BuildReceiverIntegrations(nc *config.Receiver, tmpl *template.Template) []I
 
 const contentTypeJSON = "application/json"
 
+var userAgentHeader = fmt.Sprintf("Alertmanager/%s", version.Version)
+
 // Webhook implements a Notifier for generic webhooks.
 type Webhook struct {
 	// The URL to which notifications are sent.
@@ -156,7 +160,7 @@ type WebhookMessage struct {
 
 	// The protocol version.
 	Version  string `json:"version"`
-	GroupKey uint64 `json:"groupKey"`
+	GroupKey string `json:"groupKey"`
 }
 
 // Notify implements the Notifier interface.
@@ -169,9 +173,9 @@ func (w *Webhook) Notify(ctx context.Context, alerts ...*types.Alert) (bool, err
 	}
 
 	msg := &WebhookMessage{
-		Version:  "3",
+		Version:  "4",
 		Data:     data,
-		GroupKey: uint64(groupKey),
+		GroupKey: groupKey,
 	}
 
 	var buf bytes.Buffer
@@ -179,7 +183,14 @@ func (w *Webhook) Notify(ctx context.Context, alerts ...*types.Alert) (bool, err
 		return false, err
 	}
 
-	resp, err := ctxhttp.Post(ctx, http.DefaultClient, w.URL, contentTypeJSON, &buf)
+	req, err := http.NewRequest("POST", w.URL, &buf)
+	if err != nil {
+		return true, err
+	}
+	req.Header.Set("Content-Type", contentTypeJSON)
+	req.Header.Set("User-Agent", userAgentHeader)
+
+	resp, err := ctxhttp.Do(ctx, http.DefaultClient, req)
 	if err != nil {
 		return true, err
 	}
@@ -257,17 +268,37 @@ func (n *Email) auth(mechs string) (smtp.Auth, error) {
 
 // Notify implements the Notifier interface.
 func (n *Email) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
-	// Connect to the SMTP smarthost.
-	c, err := smtp.Dial(n.conf.Smarthost)
+	// We need to know the hostname for both auth and TLS.
+	var c *smtp.Client
+	host, port, err := net.SplitHostPort(n.conf.Smarthost)
 	if err != nil {
-		return true, err
+		return false, fmt.Errorf("invalid address: %s", err)
+	}
+
+	if port == "465" {
+		conn, err := tls.Dial("tcp", n.conf.Smarthost, &tls.Config{ServerName: host})
+		if err != nil {
+			return true, err
+		}
+		c, err = smtp.NewClient(conn, n.conf.Smarthost)
+		if err != nil {
+			return true, err
+		}
+
+	} else {
+		// Connect to the SMTP smarthost.
+		c, err = smtp.Dial(n.conf.Smarthost)
+		if err != nil {
+			return true, err
+		}
 	}
 	defer c.Quit()
 
-	// We need to know the hostname for both auth and TLS.
-	host, _, err := net.SplitHostPort(n.conf.Smarthost)
-	if err != nil {
-		return false, fmt.Errorf("invalid address: %s", err)
+	if n.conf.Hello != "" {
+		err := c.Hello(n.conf.Hello)
+		if err != nil {
+			return true, err
+		}
 	}
 
 	// Global Config guarantees RequireTLS is not nil
@@ -376,7 +407,7 @@ const (
 
 type pagerDutyMessage struct {
 	ServiceKey  string            `json:"service_key"`
-	IncidentKey model.Fingerprint `json:"incident_key"`
+	IncidentKey string            `json:"incident_key"`
 	EventType   string            `json:"event_type"`
 	Description string            `json:"description"`
 	Client      string            `json:"client,omitempty"`
@@ -414,7 +445,7 @@ func (n *PagerDuty) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 	msg := &pagerDutyMessage{
 		ServiceKey:  tmpl(string(n.conf.ServiceKey)),
 		EventType:   eventType,
-		IncidentKey: key,
+		IncidentKey: hashKey(key),
 		Description: tmpl(n.conf.Description),
 		Details:     details,
 	}
@@ -471,6 +502,7 @@ type slackReq struct {
 	Username    string            `json:"username,omitempty"`
 	IconEmoji   string            `json:"icon_emoji,omitempty"`
 	IconURL     string            `json:"icon_url,omitempty"`
+	LinkNames   bool              `json:"link_names,omitempty"`
 	Attachments []slackAttachment `json:"attachments"`
 }
 
@@ -515,6 +547,7 @@ func (n *Slack) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 		Username:    tmplText(n.conf.Username),
 		IconEmoji:   tmplText(n.conf.IconEmoji),
 		IconURL:     tmplText(n.conf.IconURL),
+		LinkNames:   n.conf.LinkNames,
 		Attachments: []slackAttachment{*attachment},
 	}
 	if err != nil {
@@ -634,8 +667,8 @@ func NewOpsGenie(c *config.OpsGenieConfig, t *template.Template) *OpsGenie {
 }
 
 type opsGenieMessage struct {
-	APIKey string            `json:"apiKey"`
-	Alias  model.Fingerprint `json:"alias"`
+	APIKey string `json:"apiKey"`
+	Alias  string `json:"alias"`
 }
 
 type opsGenieCreateMessage struct {
@@ -683,7 +716,7 @@ func (n *OpsGenie) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 
 		apiMsg = opsGenieMessage{
 			APIKey: string(n.conf.APIKey),
-			Alias:  key,
+			Alias:  hashKey(key),
 		}
 		alerts = types.Alerts(as...)
 	)
@@ -767,10 +800,11 @@ const (
 )
 
 type victorOpsMessage struct {
-	MessageType  string            `json:"message_type"`
-	EntityID     model.Fingerprint `json:"entity_id"`
-	StateMessage string            `json:"state_message"`
-	From         string            `json:"monitoring_tool"`
+	MessageType       string `json:"message_type"`
+	EntityID          string `json:"entity_id"`
+	EntityDisplayName string `json:"entity_display_name"`
+	StateMessage      string `json:"state_message"`
+	MonitoringTool    string `json:"monitoring_tool"`
 }
 
 type victorOpsErrorResponse struct {
@@ -793,11 +827,12 @@ func (n *VictorOps) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 
 	var err error
 	var (
-		alerts      = types.Alerts(as...)
-		data        = n.tmpl.Data(receiverName(ctx), groupLabels(ctx), as...)
-		tmpl        = tmplText(n.tmpl, data, &err)
-		apiURL      = fmt.Sprintf("%s%s/%s", n.conf.APIURL, n.conf.APIKey, n.conf.RoutingKey)
-		messageType = n.conf.MessageType
+		alerts       = types.Alerts(as...)
+		data         = n.tmpl.Data(receiverName(ctx), groupLabels(ctx), as...)
+		tmpl         = tmplText(n.tmpl, data, &err)
+		apiURL       = fmt.Sprintf("%s%s/%s", n.conf.APIURL, n.conf.APIKey, n.conf.RoutingKey)
+		messageType  = n.conf.MessageType
+		stateMessage = tmpl(n.conf.StateMessage)
 	)
 
 	if alerts.Status() == model.AlertFiring && !victorOpsAllowedEvents[messageType] {
@@ -808,11 +843,16 @@ func (n *VictorOps) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 		messageType = victorOpsEventResolve
 	}
 
+	if len(stateMessage) > 20480 {
+		stateMessage = stateMessage[0:20475] + "\n..."
+	}
+
 	msg := &victorOpsMessage{
-		MessageType:  messageType,
-		EntityID:     key,
-		StateMessage: tmpl(n.conf.StateMessage),
-		From:         tmpl(n.conf.From),
+		MessageType:       messageType,
+		EntityID:          hashKey(key),
+		EntityDisplayName: tmpl(n.conf.EntityDisplayName),
+		StateMessage:      stateMessage,
+		MonitoringTool:    tmpl(n.conf.MonitoringTool),
 	}
 
 	if err != nil {
@@ -1041,4 +1081,12 @@ func (n *Matrix) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 	defer resp.Body.Close()
 
 	return false, nil
+}
+
+// hashKey returns the sha256 for a group key as integrations may have
+// maximum length requirements on deduplication keys.
+func hashKey(s string) string {
+	h := sha256.New()
+	h.Write([]byte(s))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }

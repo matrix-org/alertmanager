@@ -20,8 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
-	"github.com/golang/protobuf/ptypes/timestamp"
 	pb "github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +29,7 @@ func TestNlogGC(t *testing.T) {
 	// We only care about key names and expiration timestamps.
 	newEntry := func(ts time.Time) *pb.MeshEntry {
 		return &pb.MeshEntry{
-			ExpiresAt: mustTimestampProto(ts),
+			ExpiresAt: ts,
 		}
 	}
 
@@ -41,7 +39,8 @@ func TestNlogGC(t *testing.T) {
 			"a2": newEntry(now.Add(time.Second)),
 			"a3": newEntry(now.Add(-time.Second)),
 		},
-		now: func() time.Time { return now },
+		now:     func() time.Time { return now },
+		metrics: newMetrics(nil),
 	}
 	n, err := l.GC()
 	require.NoError(t, err, "unexpected error in garbage collection")
@@ -68,27 +67,27 @@ func TestNlogSnapshot(t *testing.T) {
 						Receiver:  &pb.Receiver{GroupName: "abc", Integration: "test1", Idx: 1},
 						GroupHash: []byte("126a8a51b9d1bbd07fddc65819a542c3"),
 						Resolved:  false,
-						Timestamp: mustTimestampProto(now),
+						Timestamp: now,
 					},
-					ExpiresAt: mustTimestampProto(now),
+					ExpiresAt: now,
 				}, {
 					Entry: &pb.Entry{
 						GroupKey:  []byte("d8e8fca2dc0f8abce7cb4cb0031ba249"),
 						Receiver:  &pb.Receiver{GroupName: "def", Integration: "test2", Idx: 29},
 						GroupHash: []byte("122c2331b9d1bbd07fddc65819a542c3"),
 						Resolved:  true,
-						Timestamp: mustTimestampProto(now),
+						Timestamp: now,
 					},
-					ExpiresAt: mustTimestampProto(now),
+					ExpiresAt: now,
 				}, {
 					Entry: &pb.Entry{
 						GroupKey:  []byte("aaaaaca2dc0f896fd7cb4cb0031ba249"),
 						Receiver:  &pb.Receiver{GroupName: "ghi", Integration: "test3", Idx: 0},
 						GroupHash: []byte("126a8a51b9d1bbd07fddc6e3e3e542c3"),
 						Resolved:  false,
-						Timestamp: mustTimestampProto(now),
+						Timestamp: now,
 					},
-					ExpiresAt: mustTimestampProto(now),
+					ExpiresAt: now,
 				},
 			},
 		},
@@ -98,10 +97,13 @@ func TestNlogSnapshot(t *testing.T) {
 		f, err := ioutil.TempFile("", "snapshot")
 		require.NoError(t, err, "creating temp file failed")
 
-		l1 := &nlog{st: gossipData{}}
+		l1 := &nlog{
+			st:      gossipData{},
+			metrics: newMetrics(nil),
+		}
 		// Setup internal state manually.
 		for _, e := range c.entries {
-			l1.st[stateKey(e.Entry.GroupKey, e.Entry.Receiver)] = e
+			l1.st[stateKey(string(e.Entry.GroupKey), e.Entry.Receiver)] = e
 		}
 		_, err = l1.Snapshot(f)
 		require.NoError(t, err, "creating snapshot failed")
@@ -156,7 +158,7 @@ func TestGossipDataMerge(t *testing.T) {
 	// merging logic.
 	newEntry := func(ts time.Time) *pb.MeshEntry {
 		return &pb.MeshEntry{
-			Entry: &pb.Entry{Timestamp: mustTimestampProto(ts)},
+			Entry: &pb.Entry{Timestamp: ts},
 		}
 	}
 	cases := []struct {
@@ -221,27 +223,27 @@ func TestGossipDataCoding(t *testing.T) {
 						Receiver:  &pb.Receiver{GroupName: "abc", Integration: "test1", Idx: 1},
 						GroupHash: []byte("126a8a51b9d1bbd07fddc65819a542c3"),
 						Resolved:  false,
-						Timestamp: mustTimestampProto(now),
+						Timestamp: now,
 					},
-					ExpiresAt: mustTimestampProto(now),
+					ExpiresAt: now,
 				}, {
 					Entry: &pb.Entry{
 						GroupKey:  []byte("d8e8fca2dc0f8abce7cb4cb0031ba249"),
 						Receiver:  &pb.Receiver{GroupName: "def", Integration: "test2", Idx: 29},
 						GroupHash: []byte("122c2331b9d1bbd07fddc65819a542c3"),
 						Resolved:  true,
-						Timestamp: mustTimestampProto(now),
+						Timestamp: now,
 					},
-					ExpiresAt: mustTimestampProto(now),
+					ExpiresAt: now,
 				}, {
 					Entry: &pb.Entry{
 						GroupKey:  []byte("aaaaaca2dc0f896fd7cb4cb0031ba249"),
 						Receiver:  &pb.Receiver{GroupName: "ghi", Integration: "test3", Idx: 0},
 						GroupHash: []byte("126a8a51b9d1bbd07fddc6e3e3e542c3"),
 						Resolved:  false,
-						Timestamp: mustTimestampProto(now),
+						Timestamp: now,
 					},
-					ExpiresAt: mustTimestampProto(now),
+					ExpiresAt: now,
 				},
 			},
 		},
@@ -251,7 +253,7 @@ func TestGossipDataCoding(t *testing.T) {
 		// Create gossip data from input.
 		in := gossipData{}
 		for _, e := range c.entries {
-			in[stateKey(e.Entry.GroupKey, e.Entry.Receiver)] = e
+			in[stateKey(string(e.Entry.GroupKey), e.Entry.Receiver)] = e
 		}
 		msg := in.Encode()
 		require.Equal(t, 1, len(msg), "expected single message for input")
@@ -261,20 +263,4 @@ func TestGossipDataCoding(t *testing.T) {
 
 		require.Equal(t, in, out, "decoded data doesn't match encoded data")
 	}
-}
-
-func mustTimestamp(ts *timestamp.Timestamp) time.Time {
-	res, err := ptypes.Timestamp(ts)
-	if err != nil {
-		panic(err)
-	}
-	return res
-}
-
-func mustTimestampProto(ts time.Time) *timestamp.Timestamp {
-	res, err := ptypes.TimestampProto(ts)
-	if err != nil {
-		panic(err)
-	}
-	return res
 }

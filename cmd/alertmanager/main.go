@@ -14,16 +14,15 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/binary"
 	"flag"
 	"fmt"
-	"io/ioutil"
-	stdlog "log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -47,25 +46,29 @@ import (
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/common/version"
+	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/weaveworks/mesh"
 )
 
 var (
+	configHash = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "alertmanager_config_hash",
+		Help: "Hash of the currently loaded alertmanager configuration.",
+	})
 	configSuccess = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "alertmanager",
-		Name:      "config_last_reload_successful",
-		Help:      "Whether the last configuration reload attempt was successful.",
+		Name: "alertmanager_config_last_reload_successful",
+		Help: "Whether the last configuration reload attempt was successful.",
 	})
 	configSuccessTime = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "alertmanager",
-		Name:      "config_last_reload_success_timestamp_seconds",
-		Help:      "Timestamp of the last successful configuration reload.",
+		Name: "alertmanager_config_last_reload_success_timestamp_seconds",
+		Help: "Timestamp of the last successful configuration reload.",
 	})
 )
 
 func init() {
 	prometheus.MustRegister(configSuccess)
 	prometheus.MustRegister(configSuccessTime)
+	prometheus.MustRegister(configHash)
 	prometheus.MustRegister(version.NewCollector("alertmanager"))
 }
 
@@ -79,15 +82,20 @@ func main() {
 		retention  = flag.Duration("data.retention", 5*24*time.Hour, "How long to keep data for.")
 
 		externalURL   = flag.String("web.external-url", "", "The URL under which Alertmanager is externally reachable (for example, if Alertmanager is served via a reverse proxy). Used for generating relative and absolute links back to Alertmanager itself. If the URL has a path portion, it will be used to prefix all HTTP endpoints served by Alertmanager. If omitted, relevant URL components will be derived automatically.")
+		routePrefix   = flag.String("web.route-prefix", "", "Prefix for the internal routes of web endpoints. Defaults to path of -web.external-url.")
 		listenAddress = flag.String("web.listen-address", ":9093", "Address to listen on for the web interface and API.")
 
-		meshListen = flag.String("mesh.listen-address", net.JoinHostPort("0.0.0.0", strconv.Itoa(mesh.Port)), "mesh listen address")
-		hwaddr     = flag.String("mesh.hardware-address", mustHardwareAddr(), "MAC address, i.e. mesh peer ID")
-		nickname   = flag.String("mesh.nickname", mustHostname(), "peer nickname")
+		meshListen = flag.String("mesh.listen-address", net.JoinHostPort("0.0.0.0", strconv.Itoa(mesh.Port)), "mesh listen address. Pass an empty string to disable.")
+		hwaddr     = flag.String("mesh.peer-id", "", "mesh peer ID (default: MAC address)")
+		nickname   = flag.String("mesh.nickname", mustHostname(), "mesh peer nickname")
 		password   = flag.String("mesh.password", "", "password to join the peer network (empty password disables encryption)")
 	)
 	flag.Var(peers, "mesh.peer", "initial peers (may be repeated)")
 	flag.Parse()
+
+	if *hwaddr == "" {
+		*hwaddr = mustHardwareAddr()
+	}
 
 	if len(flag.Args()) > 0 {
 		log.Fatalln("Received unexpected and unparsed arguments: ", strings.Join(flag.Args(), ", "))
@@ -107,36 +115,59 @@ func main() {
 	}
 
 	logger := log.NewLogger(os.Stderr)
-	mrouter := initMesh(*meshListen, *hwaddr, *nickname, *password)
+
+	var mrouter *mesh.Router
+	if *meshListen != "" {
+		mrouter, err = initMesh(*meshListen, *hwaddr, *nickname, *password, log.With("component", "mesh"))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	stopc := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	notificationLog, err := nflog.New(
-		nflog.WithMesh(func(g mesh.Gossiper) mesh.Gossip {
-			return mrouter.NewGossip("nflog", g)
-		}),
+	notificationLogOpts := []nflog.Option{
 		nflog.WithRetention(*retention),
 		nflog.WithSnapshot(filepath.Join(*dataDir, "nflog")),
 		nflog.WithMaintenance(15*time.Minute, stopc, wg.Done),
+		nflog.WithMetrics(prometheus.DefaultRegisterer),
 		nflog.WithLogger(logger.With("component", "nflog")),
-	)
+	}
+	if *meshListen != "" {
+		notificationLogOpts = append(notificationLogOpts, nflog.WithMesh(func(g mesh.Gossiper) mesh.Gossip {
+			res, err := mrouter.NewGossip("nflog", g)
+			if err != nil {
+				log.Fatal(err)
+			}
+			return res
+		}))
+	}
+	notificationLog, err := nflog.New(notificationLogOpts...)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	marker := types.NewMarker()
 
-	silences, err := silence.New(silence.Options{
+	silenceOpts := silence.Options{
 		SnapshotFile: filepath.Join(*dataDir, "silences"),
 		Retention:    *retention,
 		Logger:       logger.With("component", "silences"),
 		Metrics:      prometheus.DefaultRegisterer,
-		Gossip: func(g mesh.Gossiper) mesh.Gossip {
-			return mrouter.NewGossip("silences", g)
-		},
-	})
+	}
+	if *meshListen != "" {
+		silenceOpts.Gossip = func(g mesh.Gossiper) mesh.Gossip {
+			res, err := mrouter.NewGossip("silences", g)
+			if err != nil {
+				log.Fatal(err)
+			}
+			return res
+		}
+	}
+	silences, err := silence.New(silenceOpts)
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -148,7 +179,11 @@ func main() {
 		wg.Done()
 	}()
 
-	mrouter.Start()
+	// Disable mesh if empty string passed for mesh.listen-address flag.
+	if *meshListen != "" {
+		mrouter.Start()
+		mrouter.ConnectionMaker.InitiateConnections(peers.slice(), true)
+	}
 
 	defer func() {
 		close(stopc)
@@ -157,9 +192,7 @@ func main() {
 		wg.Wait()
 	}()
 
-	mrouter.ConnectionMaker.InitiateConnections(peers.slice(), true)
-
-	alerts, err := mem.NewAlerts(*dataDir)
+	alerts, err := mem.NewAlerts(marker, 30*time.Minute, *dataDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -173,16 +206,25 @@ func main() {
 	)
 	defer disp.Stop()
 
-	apiv := api.New(alerts, silences, func() dispatch.AlertOverview {
-		return disp.Groups()
-	})
+	apiv := api.New(
+		alerts,
+		silences,
+		func(matchers []*labels.Matcher) dispatch.AlertOverview {
+			return disp.Groups(matchers)
+		},
+		marker.Status,
+		mrouter,
+	)
 
 	amURL, err := extURL(*listenAddress, *externalURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	waitFunc := meshWait(mrouter, 5*time.Second)
+	waitFunc := func() time.Duration { return 0 }
+	if *meshListen != "" {
+		waitFunc = meshWait(mrouter, 5*time.Second)
+	}
 	timeoutFunc := func(d time.Duration) time.Duration {
 		if d < notify.MinTimeout {
 			d = notify.MinTimeout
@@ -190,6 +232,7 @@ func main() {
 		return d + waitFunc()
 	}
 
+	var hash float64
 	reload := func() (err error) {
 		log.With("file", *configFile).Infof("Loading configuration file")
 		defer func() {
@@ -199,15 +242,21 @@ func main() {
 			} else {
 				configSuccess.Set(1)
 				configSuccessTime.Set(float64(time.Now().Unix()))
+				configHash.Set(hash)
 			}
 		}()
 
-		conf, err := config.LoadFile(*configFile)
+		conf, plainCfg, err := config.LoadFile(*configFile)
 		if err != nil {
 			return err
 		}
 
-		apiv.Update(conf.String(), time.Duration(conf.Global.ResolveTimeout))
+		hash = md5HashAsMetricValue(plainCfg)
+
+		err = apiv.Update(conf, time.Duration(conf.Global.ResolveTimeout))
+		if err != nil {
+			return err
+		}
 
 		tmpl, err = template.FromGlobs(conf.Templates...)
 		if err != nil {
@@ -240,11 +289,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Make routePrefix default to externalURL path if empty string.
+	if routePrefix == nil || *routePrefix == "" {
+		*routePrefix = amURL.Path
+	}
+
+	*routePrefix = "/" + strings.Trim(*routePrefix, "/")
+
 	router := route.New()
 
+	if *routePrefix != "/" {
+		router = router.WithPrefix(*routePrefix)
+	}
+
 	webReload := make(chan struct{})
-	ui.Register(router.WithPrefix(amURL.Path), webReload)
-	apiv.Register(router.WithPrefix(path.Join(amURL.Path, "/api")))
+
+	ui.Register(router, webReload)
+
+	apiv.Register(router.WithPrefix("/api"))
 
 	log.Infoln("Listening on", *listenAddress)
 	go listen(*listenAddress, router)
@@ -304,7 +366,7 @@ func meshWait(r *mesh.Router, timeout time.Duration) func() time.Duration {
 	}
 }
 
-func initMesh(addr, hwaddr, nickname, pw string) *mesh.Router {
+func initMesh(addr, hwaddr, nickname, pw string, logger log.Logger) (*mesh.Router, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 
 	if err != nil {
@@ -335,8 +397,15 @@ func initMesh(addr, hwaddr, nickname, pw string) *mesh.Router {
 		ConnLimit:          64,
 		PeerDiscovery:      true,
 		TrustedSubnets:     []*net.IPNet{},
-	}, name, nickname, mesh.NullOverlay{}, stdlog.New(ioutil.Discard, "", 0))
+	}, name, nickname, mesh.NullOverlay{}, printfLogger{logger})
+}
 
+type printfLogger struct {
+	log.Logger
+}
+
+func (l printfLogger) Printf(f string, args ...interface{}) {
+	l.Debugf(f, args...)
 }
 
 func extURL(listen, external string) (*url.URL, error) {
@@ -376,7 +445,11 @@ func listen(listen string, router *route.Router) {
 type stringset map[string]struct{}
 
 func (ss stringset) Set(value string) error {
-	ss[value] = struct{}{}
+	for _, v := range strings.Split(value, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			ss[v] = struct{}{}
+		}
+	}
 	return nil
 }
 
@@ -413,4 +486,13 @@ func mustHostname() string {
 		panic(err)
 	}
 	return hostname
+}
+
+func md5HashAsMetricValue(data []byte) float64 {
+	sum := md5.Sum(data)
+	// We only want 48 bits as a float64 only has a 53 bit mantissa.
+	smallSum := sum[0:6]
+	var bytes = make([]byte, 8)
+	copy(bytes, smallSum)
+	return float64(binary.LittleEndian.Uint64(bytes))
 }

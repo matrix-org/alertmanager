@@ -1,4 +1,4 @@
-# Alertmanager [![Build Status](https://travis-ci.org/prometheus/alertmanager.svg)][travis]
+# Alertmanager [![Build Status](https://travis-ci.org/prometheus/alertmanager.svg?branch=master)][travis]
 
 [![CircleCI](https://circleci.com/gh/prometheus/alertmanager/tree/master.svg?style=shield)][circleci]
 [![Docker Repository on Quay](https://quay.io/repository/prometheus/alertmanager/status)][quay]
@@ -61,7 +61,7 @@ route:
   # all alerts. It needs to have a receiver configured so alerts that do not
   # match any of the sub-routes are sent to someone.
   receiver: 'team-X-mails'
-  
+
   # The labels by which incoming alerts are grouped together. For example,
   # multiple alerts coming in for cluster=A and alertname=LatencyHigh would
   # be batched into a single group.
@@ -82,7 +82,7 @@ route:
   # resend them.
   repeat_interval: 3h
 
-  # All the above attributes are inherited by all child routes and can 
+  # All the above attributes are inherited by all child routes and can
   # overwritten on each.
 
   # The child route trees.
@@ -174,16 +174,19 @@ To create a highly available cluster of the Alertmanager the instances need to
 be configured to communicate with each other. This is configured using the
 `-mesh.*` flags.
 
-- `-mesh.hardware-address` string: MAC address, i.e. mesh peer ID (default "&lt;hardware-mac-address&gt;")
+- `-mesh.peer-id` string: mesh peer ID (default "&lt;hardware-mac-address&gt;")
 - `-mesh.listen-address` string: mesh listen address (default "0.0.0.0:6783")
-- `-mesh.nickname` string: peer nickname (default "&lt;machine-hostname&gt;")
-- `-mesh.peer` value: initial peers (may be repeated)
+- `-mesh.nickname` string: mesh peer nickname (default "&lt;machine-hostname&gt;")
+- `-mesh.peer` value: initial peers (repeat flag for each additional peer)
 
-The `mesh.hardware-address` flag is used as a unique ID among the peers. It
-defaults to the MAC address, therefore the default value should typically be a
-good option. The same applies to the default of the `mesh.nickname` flag, as it
-defaults to the hostname. The chosen port in the `mesh.listen-address` flag is
-the port that needs to be specified in the `mesh.peer` flag of the other peers.
+The `mesh.peer-id` flag is used as a unique ID among the peers. It defaults to
+the MAC address, therefore the default value should typically be a good option.
+
+The same applies to the default of the `mesh.nickname` flag, as it defaults to
+the hostname.
+
+The chosen port in the `mesh.listen-address` flag is the port that needs to be
+specified in the `mesh.peer` flag of the other peers.
 
 To start a cluster of three peers on your local machine use `goreman` and the
 Procfile within this repository.
@@ -197,6 +200,12 @@ Start your prometheus like this, for example:
 	./prometheus -config.file=prometheus.yml -alertmanager.url http://localhost:9095,http://localhost:9094,http://localhost:9093
 
 > Note: make sure to have a valid `prometheus.yml` in your current directory
+
+> Important: Do not load balance traffic between Prometheus and its Alertmanagers, but instead point Prometheus to a list of all Alertmanagers. The Alertmanager implementation expects all alerts to be sent to all Alertmanagers to ensure high availability.
+
+## Contributing to the Front-End
+
+Refer to [ui/app/CONTRIBUTING.md](ui/app/CONTRIBUTING.md).
 
 ## Architecture
 

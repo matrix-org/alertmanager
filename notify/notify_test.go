@@ -55,20 +55,15 @@ type testNflog struct {
 	qres []*nflogpb.Entry
 	qerr error
 
-	logActiveFunc   func(r *nflogpb.Receiver, gkey, hash []byte) error
-	logResolvedFunc func(r *nflogpb.Receiver, gkey, hash []byte) error
+	logFunc func(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64) error
 }
 
 func (l *testNflog) Query(p ...nflog.QueryParam) ([]*nflogpb.Entry, error) {
 	return l.qres, l.qerr
 }
 
-func (l *testNflog) LogActive(r *nflogpb.Receiver, gkey, hash []byte) error {
-	return l.logActiveFunc(r, gkey, hash)
-}
-
-func (l *testNflog) LogResolved(r *nflogpb.Receiver, gkey, hash []byte) error {
-	return l.logResolvedFunc(r, gkey, hash)
+func (l *testNflog) Log(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64) error {
+	return l.logFunc(r, gkey, firingAlerts, resolvedAlerts)
 }
 
 func (l *testNflog) GC() (int, error) {
@@ -87,48 +82,58 @@ func mustTimestampProto(ts time.Time) *timestamp.Timestamp {
 	return tspb
 }
 
+func alertHashSet(hashes ...uint64) map[uint64]struct{} {
+	res := map[uint64]struct{}{}
+
+	for _, h := range hashes {
+		res[h] = struct{}{}
+	}
+
+	return res
+}
+
 func TestDedupStageNeedsUpdate(t *testing.T) {
 	now := utcNow()
 
 	cases := []struct {
-		entry    *nflogpb.Entry
-		hash     []byte
-		resolved bool
-		repeat   time.Duration
+		entry        *nflogpb.Entry
+		firingAlerts map[uint64]struct{}
+		repeat       time.Duration
 
 		res    bool
 		resErr bool
 	}{
 		{
-			entry: nil,
-			res:   true,
+			entry:        nil,
+			firingAlerts: alertHashSet(2, 3, 4),
+			res:          true,
 		}, {
-			entry: &nflogpb.Entry{GroupHash: []byte{1, 2, 3}},
-			hash:  []byte{2, 3, 4},
-			res:   true,
-		}, {
-			entry: &nflogpb.Entry{
-				GroupHash: []byte{1, 2, 3},
-				Timestamp: nil, // parsing will error
-			},
-			hash:   []byte{1, 2, 3},
-			resErr: true,
+			entry:        &nflogpb.Entry{FiringAlerts: []uint64{1, 2, 3}},
+			firingAlerts: alertHashSet(2, 3, 4),
+			res:          true,
 		}, {
 			entry: &nflogpb.Entry{
-				GroupHash: []byte{1, 2, 3},
-				Timestamp: mustTimestampProto(now.Add(-9 * time.Minute)),
+				FiringAlerts: []uint64{1, 2, 3},
+				Timestamp:    time.Time{}, // zero timestamp should always update
 			},
-			repeat: 10 * time.Minute,
-			hash:   []byte{1, 2, 3},
-			res:    false,
+			firingAlerts: alertHashSet(1, 2, 3),
+			res:          true,
 		}, {
 			entry: &nflogpb.Entry{
-				GroupHash: []byte{1, 2, 3},
-				Timestamp: mustTimestampProto(now.Add(-11 * time.Minute)),
+				FiringAlerts: []uint64{1, 2, 3},
+				Timestamp:    now.Add(-9 * time.Minute),
 			},
-			repeat: 10 * time.Minute,
-			hash:   []byte{1, 2, 3},
-			res:    true,
+			repeat:       10 * time.Minute,
+			firingAlerts: alertHashSet(1, 2, 3),
+			res:          false,
+		}, {
+			entry: &nflogpb.Entry{
+				FiringAlerts: []uint64{1, 2, 3},
+				Timestamp:    now.Add(-11 * time.Minute),
+			},
+			repeat:       10 * time.Minute,
+			firingAlerts: alertHashSet(1, 2, 3),
+			res:          true,
 		},
 	}
 	for i, c := range cases {
@@ -137,7 +142,7 @@ func TestDedupStageNeedsUpdate(t *testing.T) {
 		s := &DedupStage{
 			now: func() time.Time { return now },
 		}
-		ok, err := s.needsUpdate(c.entry, c.hash, c.resolved, c.repeat)
+		ok, err := s.needsUpdate(c.entry, c.firingAlerts, nil, c.repeat)
 		if c.resErr {
 			require.Error(t, err)
 		} else {
@@ -148,9 +153,17 @@ func TestDedupStageNeedsUpdate(t *testing.T) {
 }
 
 func TestDedupStage(t *testing.T) {
+	i := 0
+	now := utcNow()
 	s := &DedupStage{
-		hash:     func([]*types.Alert) []byte { return []byte{1, 2, 3} },
-		resolved: func([]*types.Alert) bool { return false },
+		hash: func(a *types.Alert) uint64 {
+			res := uint64(i)
+			i++
+			return res
+		},
+		now: func() time.Time {
+			return now
+		},
 	}
 
 	ctx := context.Background()
@@ -158,7 +171,7 @@ func TestDedupStage(t *testing.T) {
 	_, _, err := s.Exec(ctx)
 	require.EqualError(t, err, "group key missing")
 
-	ctx = WithGroupKey(ctx, 1)
+	ctx = WithGroupKey(ctx, "1")
 
 	_, _, err = s.Exec(ctx)
 	require.EqualError(t, err, "repeat interval missing")
@@ -181,35 +194,41 @@ func TestDedupStage(t *testing.T) {
 	ctx, res, err = s.Exec(ctx, alerts...)
 	require.NoError(t, err, "unexpected error on not found log entry")
 	require.Equal(t, alerts, res, "input alerts differ from result alerts")
-	// The hash must be added to the context.
-	hash, ok := NotificationHash(ctx)
-	require.True(t, ok, "notification has missing in context")
-	require.Equal(t, []byte{1, 2, 3}, hash, "notification hash does not match")
 
 	s.nflog = &testNflog{
 		qerr: nil,
 		qres: []*nflogpb.Entry{
-			{GroupHash: []byte{1, 2, 3}},
-			{GroupHash: []byte{2, 3, 4}},
+			{FiringAlerts: []uint64{0, 1, 2}},
+			{FiringAlerts: []uint64{1, 2, 3}},
 		},
 	}
 	ctx, res, err = s.Exec(ctx, alerts...)
 	require.Contains(t, err.Error(), "result size")
 
 	// Must return no error and no alerts no need to update.
+	i = 0
 	s.nflog = &testNflog{
 		qerr: nflog.ErrNotFound,
+		qres: []*nflogpb.Entry{
+			{
+				FiringAlerts: []uint64{0, 1, 2},
+				Timestamp:    now,
+			},
+		},
 	}
-	s.resolved = func([]*types.Alert) bool { return true }
 	ctx, res, err = s.Exec(ctx, alerts...)
 	require.NoError(t, err)
 	require.Nil(t, res, "unexpected alerts returned")
 
 	// Must return no error and all input alerts on changes.
+	i = 0
 	s.nflog = &testNflog{
 		qerr: nil,
 		qres: []*nflogpb.Entry{
-			{GroupHash: []byte{1, 2, 3, 4}},
+			{
+				FiringAlerts: []uint64{1, 2, 3, 4},
+				Timestamp:    now,
+			},
 		},
 	}
 	ctx, res, err = s.Exec(ctx, alerts...)
@@ -295,18 +314,44 @@ func TestRoutingStage(t *testing.T) {
 	}
 }
 
-func TestIntegration(t *testing.T) {
+func TestIntegrationNoResolved(t *testing.T) {
 	res := []*types.Alert{}
 	r := notifierFunc(func(ctx context.Context, alerts ...*types.Alert) (bool, error) {
 		res = append(res, alerts...)
 
 		return false, nil
 	})
-	i1 := Integration{
+	i := Integration{
 		notifier: r,
 		conf:     notifierConfigFunc(func() bool { return false }),
 	}
-	i2 := Integration{
+
+	alerts := []*types.Alert{
+		&types.Alert{
+			Alert: model.Alert{
+				EndsAt: time.Now().Add(-time.Hour),
+			},
+		},
+		&types.Alert{
+			Alert: model.Alert{
+				EndsAt: time.Now().Add(time.Hour),
+			},
+		},
+	}
+
+	i.Notify(nil, alerts...)
+
+	require.Equal(t, len(res), 1)
+}
+
+func TestIntegrationSendResolved(t *testing.T) {
+	res := []*types.Alert{}
+	r := notifierFunc(func(ctx context.Context, alerts ...*types.Alert) (bool, error) {
+		res = append(res, alerts...)
+
+		return false, nil
+	})
+	i := Integration{
 		notifier: r,
 		conf:     notifierConfigFunc(func() bool { return true }),
 	}
@@ -319,12 +364,9 @@ func TestIntegration(t *testing.T) {
 		},
 	}
 
-	i1.Notify(nil, alerts...)
-	i2.Notify(nil, alerts...)
+	i.Notify(nil, alerts...)
 
-	// Even though the alert is sent to both integrations, which end up being
-	// delivered to the same notifier, only one is actually delivered as the
-	// second integration filters the resolved notifications.
+	require.Equal(t, len(res), 1)
 	require.Equal(t, res, alerts)
 }
 
@@ -338,28 +380,31 @@ func TestSetNotifiesStage(t *testing.T) {
 	ctx := context.Background()
 
 	resctx, res, err := s.Exec(ctx, alerts...)
-	require.EqualError(t, err, "notification hash missing")
-	require.Nil(t, res)
-	require.NotNil(t, resctx)
-
-	ctx = WithNotificationHash(ctx, []byte{1, 2, 3})
-
-	_, res, err = s.Exec(ctx, alerts...)
 	require.EqualError(t, err, "group key missing")
 	require.Nil(t, res)
 	require.NotNil(t, resctx)
 
-	ctx = WithGroupKey(ctx, 1)
+	ctx = WithGroupKey(ctx, "1")
 
-	s.resolved = func([]*types.Alert) bool { return false }
-	tnflog.logActiveFunc = func(r *nflogpb.Receiver, gkey, hash []byte) error {
+	resctx, res, err = s.Exec(ctx, alerts...)
+	require.EqualError(t, err, "firing alerts missing")
+	require.Nil(t, res)
+	require.NotNil(t, resctx)
+
+	ctx = WithFiringAlerts(ctx, []uint64{0, 1, 2})
+
+	resctx, res, err = s.Exec(ctx, alerts...)
+	require.EqualError(t, err, "resolved alerts missing")
+	require.Nil(t, res)
+	require.NotNil(t, resctx)
+
+	ctx = WithResolvedAlerts(ctx, []uint64{})
+
+	tnflog.logFunc = func(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64) error {
 		require.Equal(t, s.recv, r)
-		require.Equal(t, []byte{0, 0, 0, 0, 0, 0, 0, 1}, gkey)
-		require.Equal(t, []byte{1, 2, 3}, hash)
-		return nil
-	}
-	tnflog.logResolvedFunc = func(r *nflogpb.Receiver, gkey, hash []byte) error {
-		t.Fatalf("LogResolved called unexpectedly")
+		require.Equal(t, "1", gkey)
+		require.Equal(t, []uint64{0, 1, 2}, firingAlerts)
+		require.Equal(t, []uint64{}, resolvedAlerts)
 		return nil
 	}
 	resctx, res, err = s.Exec(ctx, alerts...)
@@ -367,15 +412,14 @@ func TestSetNotifiesStage(t *testing.T) {
 	require.Equal(t, alerts, res)
 	require.NotNil(t, resctx)
 
-	s.resolved = func([]*types.Alert) bool { return true }
-	tnflog.logActiveFunc = func(r *nflogpb.Receiver, gkey, hash []byte) error {
-		t.Fatalf("LogActive called unexpectedly")
-		return nil
-	}
-	tnflog.logResolvedFunc = func(r *nflogpb.Receiver, gkey, hash []byte) error {
+	ctx = WithFiringAlerts(ctx, []uint64{})
+	ctx = WithResolvedAlerts(ctx, []uint64{0, 1, 2})
+
+	tnflog.logFunc = func(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64) error {
 		require.Equal(t, s.recv, r)
-		require.Equal(t, []byte{0, 0, 0, 0, 0, 0, 0, 1}, gkey)
-		require.Equal(t, []byte{1, 2, 3}, hash)
+		require.Equal(t, "1", gkey)
+		require.Equal(t, []uint64{}, firingAlerts)
+		require.Equal(t, []uint64{0, 1, 2}, resolvedAlerts)
 		return nil
 	}
 	resctx, res, err = s.Exec(ctx, alerts...)
@@ -389,8 +433,8 @@ func TestSilenceStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := silences.Create(&silencepb.Silence{
-		EndsAt:   mustTimestampProto(utcNow().Add(time.Hour)),
+	if _, err := silences.Set(&silencepb.Silence{
+		EndsAt:   utcNow().Add(time.Hour),
 		Matchers: []*silencepb.Matcher{{Name: "mute", Pattern: "me"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -423,7 +467,7 @@ func TestSilenceStage(t *testing.T) {
 		})
 	}
 
-	// Set the second alert als previously silenced. It is expected to have
+	// Set the second alert as previously silenced. It is expected to have
 	// the WasSilenced flag set to true afterwards.
 	marker.SetSilenced(inAlerts[1].Fingerprint(), "123")
 
@@ -481,7 +525,7 @@ func TestInhibitStage(t *testing.T) {
 
 	// Set the second alert as previously inhibited. It is expected to have
 	// the WasInhibited flag set to true afterwards.
-	marker.SetInhibited(inAlerts[1].Fingerprint(), true)
+	marker.SetInhibited(inAlerts[1].Fingerprint(), "123")
 
 	_, alerts, err := inhibitor.Exec(nil, inAlerts...)
 	if err != nil {
