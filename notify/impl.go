@@ -1042,7 +1042,7 @@ func NewMatrix(conf *config.MatrixConfig, tmpl *template.Template) *Matrix {
 type matrixRoomMessage struct {
 	MsgType       string `json:"msgtype"`
 	Body          string `json:"body"`
-	Format        string `json:"formatted,omitempty"`
+	Format        string `json:"format,omitempty"`
 	FormattedBody string `json:"formatted_body,omitempty"`
 }
 
