@@ -506,5 +506,5 @@ func (c *MatrixConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if err := unmarshal((*plain)(c)); err != nil {
 		return err
 	}
-	return checkOverflow(c.XXX, "matrix config")
+	return nil
 }

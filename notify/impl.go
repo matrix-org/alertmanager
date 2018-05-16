@@ -1411,7 +1411,7 @@ type matrixRoomMessage struct {
 // Notify implements the Notifier interface.
 func (n *Matrix) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 	var err error
-	var data = n.tmpl.Data(receiverName(ctx), groupLabels(ctx), as...)
+	var data = n.tmpl.Data(receiverName(ctx, nil), groupLabels(ctx, nil), as...)
 
 	// TODO(paul): generate the transaction ID on something unique about the
 	//   alert firing, to suppress duplicates

@@ -390,8 +390,9 @@ type GlobalConfig struct {
 	// if it has not been updated.
 	ResolveTimeout model.Duration `yaml:"resolve_timeout" json:"resolve_timeout"`
 
-	HTTPConfig *commoncfg.HTTPClientConfig `yaml:"http_config,omitempty" json:"http_config,omitempty"`MatrixHomeserver  string `yaml:"matrix_homeserver"`
-	MatrixAccessToken Secret `yaml:"matrix_access_token"`
+	HTTPConfig *commoncfg.HTTPClientConfig `yaml:"http_config,omitempty" json:"http_config,omitempty"`
+	MatrixHomeserver  string `yaml:"matrix_homeserver" json:"matrix_homeserver"`
+	MatrixAccessToken Secret `yaml:"matrix_access_token" json:"matrix_access_token"`
 
 	SMTPFrom         string `yaml:"smtp_from,omitempty" json:"smtp_from,omitempty"`
 	SMTPHello        string `yaml:"smtp_hello,omitempty" json:"smtp_hello,omitempty"`
